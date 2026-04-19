@@ -20,9 +20,17 @@ SCOPES = [
 ]
 
 def _get_creds():
+    import os
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from google.auth.transport.requests import Request
+
+    token_json = os.environ.get("GOOGLE_TOKEN_JSON")
+    if token_json:
+        creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return creds
 
     creds = None
     if TOKEN_PATH.exists():
