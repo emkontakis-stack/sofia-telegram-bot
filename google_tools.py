@@ -16,20 +16,13 @@ CREDS_PATH = Path.home() / ".secretary" / "google_credentials.json"
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.readonly",
 ]
 
 def _get_creds():
-    import os
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from google.auth.transport.requests import Request
-
-    token_json = os.environ.get("GOOGLE_TOKEN_JSON")
-    if token_json:
-        creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        return creds
 
     creds = None
     if TOKEN_PATH.exists():
@@ -105,6 +98,42 @@ def send_email(to: str, subject: str, body: str) -> dict:
     except Exception as e:
         return {"success": False, "error": f"Gmail error: {e}"}
 
+def get_emails(max_results: int = 10, query: str = "is:unread") -> dict:
+    """Επιστρέφει emails από το Gmail."""
+    try:
+        from googleapiclient.discovery import build
+        creds = _get_creds()
+        service = build("gmail", "v1", credentials=creds)
+
+        result = service.users().messages().list(
+            userId="me", q=query, maxResults=max_results
+        ).execute()
+
+        messages = result.get("messages", [])
+        if not messages:
+            return {"success": True, "count": 0, "emails": [], "message": "Δεν υπάρχουν νέα email."}
+
+        emails = []
+        for m in messages[:max_results]:
+            msg = service.users().messages().get(
+                userId="me", id=m["id"], format="metadata",
+                metadataHeaders=["From", "Subject", "Date"]
+            ).execute()
+            headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+            emails.append({
+                "from": headers.get("From", "—"),
+                "subject": headers.get("Subject", "(χωρίς θέμα)"),
+                "date": headers.get("Date", "—"),
+                "snippet": msg.get("snippet", "")[:150],
+            })
+
+        lines = [f"• {e['subject']} — από {e['from'].split('<')[0].strip()}" for e in emails]
+        summary = f"{len(emails)} email(s):\n" + "\n".join(lines)
+        return {"success": True, "count": len(emails), "emails": emails, "message": summary}
+    except Exception as e:
+        return {"success": False, "error": f"Gmail error: {e}"}
+
+
 def setup_google():
     """Interactive setup για Google OAuth."""
     print("\n╔══════════════════════════════════════════════════════╗")
@@ -139,6 +168,17 @@ GOOGLE_TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {
                 "days": {"type": "integer", "description": "Πόσες μέρες μπροστά να κοιτάξει (default: 1)"},
+            },
+        },
+    },
+    {
+        "name": "get_emails",
+        "description": "Επιστρέφει email από το Gmail. Χρήση όταν ο Μάνος ρωτά 'τι email έχω', 'νέα μηνύματα', 'αναπάντητα'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "max_results": {"type": "integer", "description": "Πόσα email (default: 10)"},
+                "query": {"type": "string", "description": "Gmail query (default: is:unread)"},
             },
         },
     },

@@ -22,7 +22,7 @@ from retell_tools import (
 from contacts import resolve_number, add_contact, remove_contact, list_contacts, load_contacts
 from context_manager import build_context, save_call_log, save_contact_note, list_call_logs
 from google_tools import (
-    get_calendar_events, send_email, setup_google,
+    get_calendar_events, get_emails, send_email, setup_google,
     GOOGLE_TOOL_DEFINITIONS,
 )
 
@@ -169,6 +169,8 @@ def dispatch_tool(tool_name: str, tool_input: dict, cfg: dict) -> str:
             result = {"success": True, "message": msg}
         elif tool_name == "get_calendar_events":
             result = get_calendar_events(tool_input.get("days", 1))
+        elif tool_name == "get_emails":
+            result = get_emails(tool_input.get("max_results", 10), tool_input.get("query", "is:unread"))
         elif tool_name == "send_email":
             result = send_email(
                 to=tool_input.get("to", ""),
