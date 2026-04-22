@@ -27,7 +27,7 @@ _histories: dict = {}
 def _watch_call(token: str, chat_id: int, call_id: str, contact: str, retell_key: str, claude_cfg: dict):
     """Background thread: περιμένει να τελειώσει η κλήση και στέλνει αναφορά."""
     send(token, chat_id, f"📞 Κλήση σε εξέλιξη... Θα σου στείλω αναφορά μόλις τελειώσει.")
-    max_wait = 600  # max 10 λεπτά
+    max_wait = 180  # max 3 λεπτά
     waited = 0
     call_ended = False
     while waited < max_wait:
