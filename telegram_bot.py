@@ -27,11 +27,28 @@ HISTORY_PATH = Path.home() / ".secretary" / "telegram_histories.json"
 
 # ── History persistence ────────────────────────────────────────────────────────
 
+def _clean_history(history: list) -> list:
+    """Αφαιρεί tool_result χωρίς αντίστοιχο tool_use — αποτρέπει API σφάλμα."""
+    cleaned = []
+    for msg in history:
+        content = msg.get("content", [])
+        if msg.get("role") == "user" and isinstance(content, list):
+            if content and all(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                if cleaned and cleaned[-1].get("role") == "assistant":
+                    prev = cleaned[-1].get("content", [])
+                    if isinstance(prev, list) and any(
+                        isinstance(b, dict) and b.get("type") == "tool_use" for b in prev
+                    ):
+                        cleaned.append(msg)
+                continue
+        cleaned.append(msg)
+    return cleaned
+
 def load_histories() -> dict:
     if HISTORY_PATH.exists():
         try:
             raw = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
-            return {int(k): v for k, v in raw.items()}
+            return {int(k): _clean_history(v) for k, v in raw.items()}
         except Exception:
             pass
     return {}
@@ -240,7 +257,16 @@ def handle(token: str, allowed_id: str, chat_id: int, text: str, cfg: dict):
     try:
         reply, _histories[chat_id] = run_turn(enriched, _histories[chat_id], cfg, on_text=lambda _: None)
     except Exception as e:
-        reply = f"Σφάλμα: {e}"
+        err = str(e)
+        if "tool_result" in err and "tool_use" in err:
+            # History κατεστραμμένο — καθαρίζουμε και ξαναπροσπαθούμε
+            _histories[chat_id] = []
+            try:
+                reply, _histories[chat_id] = run_turn(enriched, [], cfg, on_text=lambda _: None)
+            except Exception as e2:
+                reply = f"Σφάλμα: {e2}"
+        else:
+            reply = f"Σφάλμα: {e}"
     finally:
         stop_typing.set()
 
