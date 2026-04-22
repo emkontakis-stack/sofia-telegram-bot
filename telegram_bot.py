@@ -29,6 +29,7 @@ def _watch_call(token: str, chat_id: int, call_id: str, contact: str, retell_key
     send(token, chat_id, f"📞 Κλήση σε εξέλιξη... Θα σου στείλω αναφορά μόλις τελειώσει.")
     max_wait = 600  # max 10 λεπτά
     waited = 0
+    call_ended = False
     while waited < max_wait:
         time.sleep(15)
         waited += 15
@@ -36,7 +37,16 @@ def _watch_call(token: str, chat_id: int, call_id: str, contact: str, retell_key
             details = get_call_details(retell_key, call_id)
             status = details.get("status", "")
             if status in ("ended", "error"):
+                call_ended = True
                 break
+        except Exception:
+            pass
+
+    # Αν η κλήση δεν τελείωσε μόνη της, κλείσ' την
+    if not call_ended:
+        try:
+            from retell_tools import end_call as _end_call
+            _end_call(retell_key, call_id)
         except Exception:
             pass
 
