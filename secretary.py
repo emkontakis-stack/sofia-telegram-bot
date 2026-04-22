@@ -61,8 +61,10 @@ def build_system_prompt() -> str:
         return SYSTEM_PROMPT_BASE + "\n\n" + context
     return SYSTEM_PROMPT_BASE
 
-def claude_stream(messages: list, cfg: dict) -> tuple:
-    """Streaming request: prints text tokens in real-time, returns (content_list, stop_reason)."""
+def claude_stream(messages: list, cfg: dict, on_text=None) -> tuple:
+    """Streaming request: calls on_text(chunk) for each text token, returns (content_list, stop_reason)."""
+    if on_text is None:
+        on_text = lambda chunk: print(chunk, end="", flush=True)
     payload = {
         "model": cfg.get("model", "claude-haiku-4-5-20251001"),
         "max_tokens": cfg.get("max_tokens", 1024),
@@ -104,7 +106,7 @@ def claude_stream(messages: list, cfg: dict) -> tuple:
                     if delta["type"] == "text_delta":
                         chunk = delta["text"]
                         blocks[idx]["text"] = blocks[idx].get("text", "") + chunk
-                        print(chunk, end="", flush=True)
+                        on_text(chunk)
                     elif delta["type"] == "input_json_delta":
                         blocks[idx]["_raw"] = blocks[idx].get("_raw", "") + delta["partial_json"]
                 elif etype == "content_block_stop":
@@ -183,43 +185,56 @@ def dispatch_tool(tool_name: str, tool_input: dict, cfg: dict) -> str:
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
-def run_turn(user_message: str, history: list, cfg: dict) -> tuple:
+def run_turn(user_message: str, history: list, cfg: dict, on_text=None) -> tuple:
+    """Returns (reply_text, updated_history). on_text(chunk) called for each streaming chunk."""
+    collected = []
+    def _collect(chunk):
+        collected.append(chunk)
+        if on_text:
+            on_text(chunk)
+
     messages = history + [{"role": "user", "content": user_message}]
     first_response = True
     while True:
-        if first_response:
-            first_response = False
-        else:
+        if not first_response and on_text is None:
             print("\nΓραμματεία: ", end="", flush=True)
-        content, stop_reason = claude_stream(messages, cfg)
+        first_response = False
+
+        content, stop_reason = claude_stream(messages, cfg, on_text=_collect if on_text is not None else None)
         messages.append({"role": "assistant", "content": content})
+
         if stop_reason == "tool_use":
-            print()
+            if on_text is None:
+                print()
             tool_results = []
             for block in content:
                 if block.get("type") == "tool_use":
                     tool_name = block["name"]
                     tool_input = block.get("input", {})
                     tool_id = block["id"]
-                    print(f"  🔧 {tool_name}({json.dumps(tool_input, ensure_ascii=False)})")
+                    if on_text is None:
+                        print(f"  🔧 {tool_name}({json.dumps(tool_input, ensure_ascii=False)})")
                     result_str = dispatch_tool(tool_name, tool_input, cfg)
                     result_data = json.loads(result_str)
-                    if result_data.get("success"):
-                        print(f"  ✓ {result_data.get('message') or 'OK'}")
-                    else:
-                        print(f"  ✗ {result_data.get('error', 'Σφάλμα')}")
+                    if on_text is None:
+                        if result_data.get("success"):
+                            print(f"  ✓ {result_data.get('message') or 'OK'}")
+                        else:
+                            print(f"  ✗ {result_data.get('error', 'Σφάλμα')}")
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_id,
                         "content": result_str,
                     })
             messages.append({"role": "user", "content": tool_results})
+            collected.clear()
         elif stop_reason in ("end_turn", "stop_sequence", None):
             updated_history = messages[-40:]
-            return "", updated_history
+            return "".join(collected).strip(), updated_history
         else:
-            print(f"\n[Απροσδόκητο stop_reason: {stop_reason}]")
-            return "", messages
+            if on_text is None:
+                print(f"\n[Απροσδόκητο stop_reason: {stop_reason}]")
+            return "".join(collected).strip(), messages
 
 def handle_local_command(cmd: str) -> tuple:
     parts = cmd.strip().split(None, 2)

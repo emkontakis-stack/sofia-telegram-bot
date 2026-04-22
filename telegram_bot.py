@@ -12,6 +12,7 @@ import os
 import urllib.request
 import urllib.error
 from datetime import datetime
+from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from config import get_config, load_config, save_config
@@ -22,7 +23,29 @@ from retell_tools import get_call_details
 
 BASE = "https://api.telegram.org/bot{token}/{method}"
 
-_histories: dict = {}
+HISTORY_PATH = Path.home() / ".secretary" / "telegram_histories.json"
+
+# ── History persistence ────────────────────────────────────────────────────────
+
+def load_histories() -> dict:
+    if HISTORY_PATH.exists():
+        try:
+            raw = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            return {int(k): v for k, v in raw.items()}
+        except Exception:
+            pass
+    return {}
+
+def save_histories(histories: dict):
+    HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HISTORY_PATH.write_text(
+        json.dumps({str(k): v for k, v in histories.items()}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+_histories: dict = load_histories()
+
+# ── Call watcher ───────────────────────────────────────────────────────────────
 
 def _watch_call(token: str, chat_id: int, call_id: str, contact: str, retell_key: str, claude_cfg: dict):
     """Background thread: περιμένει να τελειώσει η κλήση και στέλνει αναφορά."""
@@ -42,7 +65,6 @@ def _watch_call(token: str, chat_id: int, call_id: str, contact: str, retell_key
         except Exception:
             pass
 
-    # Αν η κλήση δεν τελείωσε μόνη της, κλείσ' την
     if not call_ended:
         try:
             from retell_tools import end_call as _end_call
@@ -50,7 +72,6 @@ def _watch_call(token: str, chat_id: int, call_id: str, contact: str, retell_key
         except Exception:
             pass
 
-    # Φέρνουμε transcript και ζητάμε σύνοψη από Claude
     try:
         details = get_call_details(retell_key, call_id)
         transcript = details.get("transcript_preview", "")
@@ -58,7 +79,6 @@ def _watch_call(token: str, chat_id: int, call_id: str, contact: str, retell_key
         phone = details.get("to_number", "—")
 
         if transcript and transcript != "—":
-            # Σύνοψη μέσω Claude
             import urllib.request as _ur
             import json as _j
             payload = {
@@ -125,6 +145,16 @@ def send(token: str, chat_id: int, text: str):
 def send_typing(token: str, chat_id: int):
     tg(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
 
+def start_typing_loop(token: str, chat_id: int) -> threading.Event:
+    """Ξεκινά background thread που στέλνει typing indicator κάθε 4 δευτερόλεπτα."""
+    stop = threading.Event()
+    def _loop():
+        while not stop.is_set():
+            send_typing(token, chat_id)
+            stop.wait(4)
+    threading.Thread(target=_loop, daemon=True).start()
+    return stop
+
 # ── Message handling ──────────────────────────────────────────────────────────
 
 def handle(token: str, allowed_id: str, chat_id: int, text: str, cfg: dict):
@@ -134,9 +164,10 @@ def handle(token: str, allowed_id: str, chat_id: int, text: str, cfg: dict):
 
     text = text.strip()
 
-    # Local commands
+    # ── Local commands ──
     if text in ("/start", "/start@" + cfg.get("bot_username", "")):
         _histories[chat_id] = []
+        save_histories(_histories)
         send(token, chat_id,
             "Γεια σου Μάνο! Είμαι η <b>Σοφία</b>, η AI γραμματεία σου.\n\n"
             "• «κάλεσε τον Γιώργη»\n"
@@ -154,12 +185,26 @@ def handle(token: str, allowed_id: str, chat_id: int, text: str, cfg: dict):
         send(token, chat_id, list_contacts())
         return
 
+    if text.startswith("/add "):
+        parts = text[5:].strip().split(None, 1)
+        if len(parts) == 2:
+            send(token, chat_id, add_contact(parts[0], parts[1]))
+        else:
+            send(token, chat_id, "Χρήση: /add Όνομα +30XXXXXXXXXX")
+        return
+
+    if text.startswith("/remove "):
+        name = text[8:].strip()
+        send(token, chat_id, remove_contact(name))
+        return
+
     if text.startswith("/logs"):
         send(token, chat_id, list_call_logs())
         return
 
     if text.startswith("/clear"):
         _histories[chat_id] = []
+        save_histories(_histories)
         send(token, chat_id, "✓ Ιστορικό καθαρίστηκε.")
         return
 
@@ -167,6 +212,8 @@ def handle(token: str, allowed_id: str, chat_id: int, text: str, cfg: dict):
         send(token, chat_id,
             "<b>ΕΝΤΟΛΕΣ:</b>\n"
             "/contacts — βιβλίο επαφών\n"
+            "/add Όνομα +30… — νέα επαφή\n"
+            "/remove Όνομα — διαγραφή επαφής\n"
             "/logs — ιστορικό κλήσεων\n"
             "/clear — καθαρισμός ιστορικού\n"
             "/chatid — το chat ID σου\n\n"
@@ -178,7 +225,7 @@ def handle(token: str, allowed_id: str, chat_id: int, text: str, cfg: dict):
         )
         return
 
-    # Enrichment με επαφές
+    # ── AI turn ──
     contacts = load_contacts()
     enriched = text
     for name, number in contacts.items():
@@ -186,24 +233,18 @@ def handle(token: str, allowed_id: str, chat_id: int, text: str, cfg: dict):
             enriched = f"{text} [Σημείωση: '{name}' = {number}]"
             break
 
-    send_typing(token, chat_id)
-
     if chat_id not in _histories:
         _histories[chat_id] = []
 
-    # Συλλογή output (run_turn γράφει στο stdout)
-    collected = []
-    class Collector:
-        def write(self, s): collected.append(s)
-        def flush(self): pass
-
-    import sys
-    old_stdout = sys.stdout
-    sys.stdout = Collector()
+    stop_typing = start_typing_loop(token, chat_id)
     try:
-        _, _histories[chat_id] = run_turn(enriched, _histories[chat_id], cfg)
+        reply, _histories[chat_id] = run_turn(enriched, _histories[chat_id], cfg, on_text=lambda _: None)
+    except Exception as e:
+        reply = f"Σφάλμα: {e}"
     finally:
-        sys.stdout = old_stdout
+        stop_typing.set()
+
+    save_histories(_histories)
 
     # Αν έγινε make_call, ξεκίνα background watcher
     for msg in reversed(_histories[chat_id]):
@@ -215,7 +256,6 @@ def handle(token: str, allowed_id: str, chat_id: int, text: str, cfg: dict):
                         call_id = result.get("call_id", "")
                         if call_id:
                             contact = result.get("to_number", "Άγνωστος")
-                            # Βρες όνομα επαφής
                             for name, num in load_contacts().items():
                                 if num == contact:
                                     contact = name
@@ -228,22 +268,6 @@ def handle(token: str, allowed_id: str, chat_id: int, text: str, cfg: dict):
                     except Exception:
                         pass
             break
-
-    raw = "".join(collected).strip()
-
-    # Κρατάμε μόνο γραμμές που δεν είναι tool output
-    lines = [l for l in raw.splitlines()
-             if not l.strip().startswith(("🔧", "✓ ", "✗ ", "Γραμματεία: ", "Σοφία: "))]
-    reply = "\n".join(lines).strip()
-
-    # Αν δεν υπάρχει κείμενο (μόνο tool calls εκτελέστηκαν), δες τελευταία γραμμή
-    if not reply:
-        all_lines = raw.splitlines()
-        for l in reversed(all_lines):
-            clean = l.strip().lstrip("✓ ✗ ")
-            if clean:
-                reply = clean
-                break
 
     send(token, chat_id, reply or "✓ Έγινε.")
 
@@ -269,6 +293,7 @@ def main():
 ╠══════════════════════════════════════╣
 ║  Κατάσταση: ΕΝΕΡΓΗ                   ║
 ║  Ασφάλεια: {("ID " + allowed) if allowed else "Ανοιχτή ⚠"}{"" + " " * (25 - len(("ID " + allowed) if allowed else "Ανοιχτή ⚠"))}║
+║  Ιστορικό: {len(_histories)} chat(s) φορτώθηκαν{"" + " " * (18 - len(str(len(_histories))))}║
 ║  Ctrl+C για τερματισμό               ║
 ╚══════════════════════════════════════╝
 Αναμονή μηνυμάτων...
