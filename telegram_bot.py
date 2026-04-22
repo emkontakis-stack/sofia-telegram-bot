@@ -42,6 +42,9 @@ def _clean_history(history: list) -> list:
                         cleaned.append(msg)
                 continue
         cleaned.append(msg)
+    # History πρέπει πάντα να τελειώνει με assistant (όχι tool_result user)
+    while cleaned and cleaned[-1].get("role") != "assistant":
+        cleaned.pop()
     return cleaned
 
 def load_histories() -> dict:
